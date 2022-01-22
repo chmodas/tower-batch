@@ -16,7 +16,7 @@ tower = { version = "0.4.11" }
 
 [dev-dependencies]
 
-tracing-subscriber = { version = "0.2.19", features = ["registry", "env-filter"] }
+tracing-subscriber = { version = "0.3.6", features = ["registry", "env-filter"] }
 futures = "0.3"
 tokio = { version = "1", features = ["macros", "sync", "test-util", "rt-multi-thread"] }
 tokio-test = "0.4.2"
