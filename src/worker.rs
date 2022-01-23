@@ -10,8 +10,7 @@ use std::{
 use futures_core::ready;
 use tokio::{
     sync::{mpsc, Semaphore},
-    task::JoinHandle,
-    time::sleep,
+    time::{sleep, Sleep},
 };
 use tower::Service;
 
@@ -52,7 +51,7 @@ pin_project_lite::pin_project! {
         finish: bool,
         batch_until: Option<Instant>,
         batch_size: usize,
-        sleep_handle: Option<JoinHandle<()>>
+        sleep: Option<Pin<Box<Sleep>>>
     }
 
     impl<T, Request> PinnedDrop for Worker<T, Request>
@@ -120,7 +119,7 @@ where
 
             batch_until: None,
             batch_size: 0,
-            sleep_handle: None,
+            sleep: None,
         };
 
         (handle, worker)
@@ -213,16 +212,10 @@ where
                 tracing::debug!(service.ready = true, reason, message = "flushing batch");
                 let _ = self.service.call(BatchControl::Flush);
 
-                // Abort the 'max time' wake-up timer
-                if let Some(handle) = self.sleep_handle.take() {
-                    tracing::trace!("aborting the 'max time' wake-up timer handle");
-                    handle.abort();
-                }
-
                 tracing::trace!("preparing for next batch");
                 self.batch_size = 0;
                 self.batch_until = None;
-                self.sleep_handle = None;
+                self.sleep = None;
             }
             Poll::Pending => {
                 tracing::trace!(service.ready = false, reason, message = "delay flush");
@@ -258,7 +251,7 @@ where
         if let Some(ts) = self.batch_until {
             let now = Instant::now();
             if ts <= now {
-                tracing::info!(elapsed = ?now.duration_since(ts), "time expired, flushing");
+                tracing::trace!("time expired, flushing");
                 let _ = ready!(self.flush(cx, "time"));
             }
         }
@@ -287,19 +280,10 @@ where
                     );
 
                     // The first message in a new batch.
-                    if self.batch_until.is_none() {
+                    if self.batch_size == 0 {
                         // Set the batch timer
                         tracing::trace!("buffer empty; starting 'max time' wake-up timer");
-
-                        let waker = cx.waker().clone();
-                        let duration = self.max_time;
-                        let sleep_handle: JoinHandle<()> = tokio::spawn(async move {
-                            sleep(duration).await;
-                            tracing::trace!("max time reached; waking the worker");
-                            waker.wake_by_ref();
-                        });
-
-                        self.sleep_handle = Some(sleep_handle);
+                        self.sleep = Some(Box::pin(sleep(self.max_time)));
                         self.batch_until = Some(Instant::now().add(self.max_time));
                     }
 
@@ -322,6 +306,12 @@ where
                             // TODO: Should we discard the failed futures?
                             if self.batch_size == self.max_size {
                                 let _ = ready!(self.flush(cx, "size"));
+                            }
+
+                            if let Some(ref mut sleep) = self.sleep {
+                                if Pin::new(sleep).poll(cx).is_ready() {
+                                    tracing::trace!("max time reached; waking the worker");
+                                }
                             }
                         }
                         Poll::Pending => {

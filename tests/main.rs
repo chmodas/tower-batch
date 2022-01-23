@@ -583,7 +583,7 @@ async fn batch_flushes_on_elapsed_time_unit() -> Result<(), BoxError> {
     assert_request_eq!(handle, BatchControl::Item("hello")).send_response(());
     assert_ready_ok!(response.poll());
 
-    tokio::time::sleep(Duration::from_millis(99)).await;
+    tokio::time::sleep(Duration::from_millis(98)).await;
     assert!(!worker.is_woken());
 
     // Give the batch plenty of time to flush
