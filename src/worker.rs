@@ -210,7 +210,12 @@ where
         match self.service.poll_ready(cx) {
             Poll::Ready(Ok(())) => {
                 tracing::debug!(service.ready = true, reason, message = "flushing batch");
-                let _ = self.service.call(BatchControl::Flush);
+
+                let response = self.service.call(BatchControl::Flush);
+                tokio::pin!(response);
+                if let Err(e) = ready!(response.poll(cx)) {
+                    self.failed(e.into());
+                }
 
                 tracing::trace!("preparing for next batch");
                 self.batch_size = 0;
@@ -238,7 +243,7 @@ where
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        tracing::info!("polling Batch worker");
+        tracing::trace!("polling Batch worker");
 
         if self.finish {
             return Poll::Ready(());

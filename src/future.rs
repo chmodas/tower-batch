@@ -1,13 +1,15 @@
 //! Future types for the `Batch` middleware.
 
-use super::{error::Closed, message};
-use futures_core::ready;
-use pin_project::pin_project;
 use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
+
+use futures_core::ready;
+use pin_project::pin_project;
+
+use super::{error::Closed, message};
 
 /// Future that completes when the batch processing is complete.
 #[pin_project]
@@ -62,7 +64,7 @@ where
                     return Poll::Ready(Err(e.take().expect("polled after error")));
                 }
                 ResponseStateProj::Rx(rx) => match ready!(rx.poll(cx)) {
-                    Ok(Ok(f)) => this.state.set(ResponseState::Poll(f)), // XXX: sets the self.state under the projection to Poll
+                    Ok(Ok(f)) => this.state.set(ResponseState::Poll(f)),
                     Ok(Err(e)) => return Poll::Ready(Err(e.into())),
                     Err(_) => return Poll::Ready(Err(Closed::new().into())),
                 },
