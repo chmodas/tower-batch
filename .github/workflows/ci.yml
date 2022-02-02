@@ -14,15 +14,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - name: Cargo Cache
-        uses: actions/cache@v2
+      - name: Install Rust stable
+        uses: actions-rs/toolchain@v1
         with:
-          path: |
-            target
-            ~/.cargo
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          toolchain: stable
+          override: true
+      - name: Cargo Cache
+        uses: Swatinem/rust-cache@v1
       - name: Build and test
         run: |
           cargo clippy --all-targets --all-features --  -D warnings
