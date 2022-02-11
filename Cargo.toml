@@ -9,7 +9,7 @@ futures-core = "0.3"
 pin-project = "1"
 pin-project-lite = "0.2.7"
 tokio = { version = "1", features = ["sync", "time", "tracing", "rt"] }
-tokio-util = { version = "0.6.3", default-features = false }
+tokio-util = { version = "0.7.0", default-features = false }
 tracing = "0.1.29"
 tracing-futures = "0.2.5"
 tower = { version = "0.4.11" }
