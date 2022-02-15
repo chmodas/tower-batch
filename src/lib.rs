@@ -5,10 +5,12 @@
 /// Export tower's alias for a type-erased error type.
 pub use tower::BoxError;
 
+pub use self::layer::BatchLayer;
 pub use self::service::Batch;
 
 pub mod error;
 pub mod future;
+mod layer;
 mod message;
 mod service;
 mod worker;
