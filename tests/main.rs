@@ -10,11 +10,14 @@ use std::{
     time::Duration,
 };
 
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
+use futures::{stream::FuturesUnordered, StreamExt};
+use tokio::task::JoinHandle;
 use tokio_test::{assert_pending, assert_ready, assert_ready_err, assert_ready_ok, task};
 use tower::{Service, ServiceExt};
-use tower_test::{assert_request_eq, mock::{self, Mock}};
+use tower_test::{
+    assert_request_eq,
+    mock::{self, Mock},
+};
 
 use tower_batch::{Batch, BatchControl, BoxError, error};
 
@@ -44,8 +47,8 @@ impl<T> Aggregator<T> {
 }
 
 impl<T> Service<BatchControl<T>> for Aggregator<T>
-    where
-        T: Debug,
+where
+    T: Debug,
 {
     type Response = ();
     type Error = BoxError;
@@ -71,6 +74,16 @@ impl<T> Service<BatchControl<T>> for Aggregator<T>
             BatchControl::Flush => {
                 self.current
                     .fetch_add(self.current.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                return Box::pin(async {
+                    tracing::info!("sleeping ...");
+                    async {
+                        // Simulate some activity to catch any flushing issues
+                        tokio::time::sleep(Duration::from_nanos(5)).await;
+                    }
+                    .await;
+                    tracing::info!("awaking ...");
+                    Ok(())
+                });
             }
         }
 
@@ -131,12 +144,13 @@ async fn batch_flushes_on_elapsed_time() -> Result<(), BoxError> {
     Ok(())
 }
 
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clears_canceled_requests() {
     let _guard = support::trace_init();
 
     let (mut service, mut handle) = mock::spawn_with(|s: Mock<BatchControl<&str>, &str>| {
-        let (svc, worker) = Batch::pair(s, 10, Duration::from_secs(1));
+        let (svc, worker) = Batch::pair(s, 2, Duration::from_secs(1));
 
         tokio::spawn(async move {
             let _guard = support::trace_init();
@@ -161,6 +175,8 @@ async fn clears_canceled_requests() {
 
     assert_pending!(handle.poll_request());
 
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
     assert_ready_ok!(service.poll_ready());
     let mut res3 = task::spawn(service.call("hello3"));
 
@@ -169,16 +185,20 @@ async fn clears_canceled_requests() {
     send_response1.send_response("world");
 
     // Let worker work
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(assert_ready_ok!(res1.poll()), "world");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_pending!(res1.poll());
+    assert_pending!(res3.poll());
 
     // res2 was dropped, so it should have been canceled in the buffer
     handle.allow(1);
-
     assert_request_eq!(handle, BatchControl::from("hello3")).send_response("world3");
 
     // Let worker work
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    handle.allow(2);
+    assert_request_eq!(handle, BatchControl::Flush).send_response("flush");
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(assert_ready_ok!(res1.poll()), "world");
     assert_eq!(assert_ready_ok!(res3.poll()), "world3");
 }
 
@@ -210,9 +230,10 @@ async fn when_inner_is_not_ready() {
     assert_pending!(res1.poll());
     assert_pending!(handle.poll_request());
 
-    handle.allow(1);
+    handle.allow(3);
 
     assert_request_eq!(handle, BatchControl::from("hello")).send_response("world");
+    assert_request_eq!(handle, BatchControl::Flush).send_response("flushed");
 
     // Let worker work
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -294,7 +315,6 @@ async fn response_future_when_worker_is_dropped_early() {
     assert!(err.is::<error::Closed>(), "should be a Closed: {:?}", err);
 }
 
-#[ignore = "response4 stuck because the flush() future never completes"]
 #[tokio::test(flavor = "current_thread")]
 async fn waits_for_channel_capacity() -> Result<(), BoxError> {
     let _guard = support::trace_init();
@@ -331,7 +351,7 @@ async fn waits_for_channel_capacity() -> Result<(), BoxError> {
         .1
         .send_response("world");
     assert_pending!(worker.poll());
-    assert_ready_ok!(response1.poll());
+    assert_pending!(response1.poll());
 
     assert_ready_ok!(service.poll_ready());
     let mut response4 = task::spawn(service.call("hello"));
@@ -347,7 +367,7 @@ async fn waits_for_channel_capacity() -> Result<(), BoxError> {
         .1
         .send_response("world");
     assert_pending!(worker.poll());
-    assert_ready_ok!(response2.poll());
+    assert_pending!(response2.poll());
 
     handle
         .next_request()
@@ -356,12 +376,17 @@ async fn waits_for_channel_capacity() -> Result<(), BoxError> {
         .1
         .send_response("world");
     assert_pending!(worker.poll());
+    assert_pending!(response3.poll());
+
+    // Flushing the batch will complete the pending futures
+    assert_request_eq!(handle, BatchControl::Flush).send_response("world");
+    assert_pending!(worker.poll());
+
+    assert_ready_ok!(response1.poll());
+    assert_ready_ok!(response2.poll());
     assert_ready_ok!(response3.poll());
 
-    // The batch size is 3, therefore we expect a Flush at this point
-    // FIXME: What is preventing the future from completing?
-    assert_request_eq!(handle, BatchControl::Flush).send_response("world");
-
+    // Only the queued one is still pending
     handle
         .next_request()
         .await
@@ -369,10 +394,48 @@ async fn waits_for_channel_capacity() -> Result<(), BoxError> {
         .1
         .send_response("world");
     assert_pending!(worker.poll());
-    assert_ready_ok!(response4.poll());
+    assert_pending!(response4.poll());
 
     Ok(())
 }
+
+#[tokio::test]
+async fn request_futures_fail_if_flush_fails() {
+    let _guard = support::trace_init();
+
+    let (service, mut handle) = mock::pair::<BatchControl<&str>, ()>();
+    let (service, worker) = Batch::pair(service, 2, Duration::from_secs(1));
+
+    let mut service = mock::Spawn::new(service);
+    let mut worker = task::spawn(worker);
+
+
+    handle.allow(4);
+
+    assert_ready_ok!(service.poll_ready());
+    let mut res1 = task::spawn(service.call("hello1"));
+
+    assert_ready_ok!(service.poll_ready());
+    let mut res2 = task::spawn(service.call("hello2"));
+
+    // Let the worker work.
+    assert_pending!(worker.poll());
+
+    assert_request_eq!(handle, BatchControl::from("hello1")).send_response(());
+    assert_pending!(res1.poll());
+
+    assert_request_eq!(handle, BatchControl::from("hello2")).send_response(());
+    assert_pending!(res2.poll());
+
+    // If the flush fails, so will the worker and any pending futures
+    handle.allow(2);
+    assert_request_eq!(handle, BatchControl::Flush).send_error("flush failed");
+
+    assert_ready!(worker.poll());
+    assert_ready_err!(res1.poll());
+    assert_ready_err!(res2.poll());
+}
+
 
 #[tokio::test(flavor = "current_thread")]
 async fn wakes_pending_waiters_on_close() -> Result<(), BoxError> {
@@ -504,12 +567,16 @@ async fn propagates_trace_spans() -> Result<(), BoxError> {
     let span = tracing::info_span!("my_span");
 
     let service = support::AssertSpanSvc::new(span.clone());
-    let (service, worker) = Batch::pair(service, 5, Duration::from_secs(1));
+    let (mut service, worker) = Batch::pair(service, 5, Duration::from_millis(250));
     let worker = tokio::spawn(worker);
 
-    let result = tokio::spawn(service.oneshot(()).instrument(span));
+    let result: JoinHandle<Result<(), tower_batch::BoxError>> = tokio::spawn(async move {
+        service.ready().await?;
+        let _ = service.call(()).await?;
+        Ok(())
+    });
 
-    result.await??;
+    let _ = result.instrument(span).await?;
     worker.await?;
 
     Ok(())
@@ -544,64 +611,25 @@ async fn doesnt_leak_permits() {
     let mut ready3 = task::spawn(service3.ready());
     assert_pending!(ready3.poll());
 
-    // Consume the first service's readiness.
-    let mut response = task::spawn(service1.call(()));
-    handle.allow(1);
+    // Consume the first two service's readiness.
+    let mut response1 = task::spawn(service1.call(()));
+    let mut response2 = task::spawn(service2.call(()));
+    handle.allow(3);
     assert_pending!(worker.poll());
 
     handle.next_request().await.unwrap().1.send_response(());
     assert_pending!(worker.poll());
-    assert_ready_ok!(response.poll());
+
+    handle.next_request().await.unwrap().1.send_response(());
+    assert_pending!(worker.poll());
+
+    assert_request_eq!(handle, BatchControl::Flush).send_response(());
+    assert_pending!(worker.poll());
+
+    assert_ready_ok!(response1.poll());
+    assert_ready_ok!(response2.poll());
 
     // Now, the third service should acquire a permit...
     assert!(ready3.is_woken());
     assert_ready_ok!(ready3.poll());
-}
-
-// TODO: the 'batch_flushes_on_elapsed_time' and the 'batch_flushes_on_elapsed_time' test the same
-//  functionality with a different approach; the former is an integration test and the latter a unit
-//  one. Any good reason to keep both around?
-#[tokio::test(flavor = "current_thread")]
-async fn batch_flushes_on_elapsed_time_unit() -> Result<(), BoxError> {
-    let _guard = support::trace_init();
-
-    let (service, mut handle) = mock::pair::<_, ()>();
-
-    let (mut service, worker) = Batch::pair(service, 10, Duration::from_millis(100));
-    let mut worker = task::spawn(worker);
-
-    // Keep the request in the worker
-    handle.allow(0);
-    service.ready().await?;
-    assert_pending!(worker.poll());
-
-    let mut response = task::spawn(service.call("hello"));
-    assert_pending!(response.poll());
-    assert_pending!(handle.poll_request());
-
-    handle.allow(1);
-
-    assert_pending!(worker.poll());
-    assert_request_eq!(handle, BatchControl::Item("hello")).send_response(());
-    assert_ready_ok!(response.poll());
-
-    tokio::time::sleep(Duration::from_millis(98)).await;
-    assert!(!worker.is_woken());
-
-    // Give the batch plenty of time to flush
-    tokio::time::sleep(Duration::from_millis(2)).await;
-
-    // Poll the worker - enough time has passed, but the service is not ready.
-    assert!(worker.is_woken());
-    assert_pending!(worker.poll());
-    assert_pending!(handle.poll_request());
-
-    // Make the service ready
-    handle.allow(1);
-
-    assert!(worker.is_woken());
-    assert_pending!(worker.poll());
-    assert_request_eq!(handle, BatchControl::Flush).send_response(());
-
-    Ok(())
 }

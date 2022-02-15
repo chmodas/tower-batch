@@ -1,5 +1,6 @@
 use std::{
     future::Future,
+    mem,
     ops::Add,
     pin::Pin,
     sync::{Arc, Mutex, Weak},
@@ -10,20 +11,54 @@ use std::{
 use futures_core::ready;
 use tokio::{
     sync::{mpsc, Semaphore},
-    time::{sleep, Sleep},
+    time::{sleep_until, Sleep},
 };
 use tower::Service;
+use tracing::{debug, trace};
 
 use super::{
-    BatchControl,
     error::{Closed, ServiceError},
-    message::Message,
+    message::{Message, Tx},
+    BatchControl,
 };
 
 /// Get the error out
 #[derive(Debug)]
 pub(crate) struct Handle {
     inner: Arc<Mutex<Option<ServiceError>>>,
+}
+
+/// Wrap `Service` channel for easier use through projections.
+#[derive(Debug)]
+struct Bridge<Fut, Request> {
+    rx: mpsc::UnboundedReceiver<Message<Request, Fut>>,
+    handle: Handle,
+    current_message: Option<Message<Request, Fut>>,
+    close: Option<Weak<Semaphore>>,
+    failed: Option<ServiceError>,
+}
+
+#[derive(Debug)]
+struct Lot<Fut> {
+    max_size: usize,
+    max_time: Duration,
+    responses: Vec<(Tx<Fut>, Result<Fut, ServiceError>)>,
+    expires: Option<Pin<Box<Sleep>>>,
+    closed: bool,
+}
+
+pin_project_lite::pin_project! {
+    #[project = StateProj]
+    #[derive(Debug)]
+    enum State<Fut> {
+        Collecting,
+        Flushing {
+            reason: Option<String>,
+            #[pin]
+            flush_fut: Option<Fut>,
+        },
+        Finished
+    }
 }
 
 pin_project_lite::pin_project! {
@@ -40,48 +75,15 @@ pin_project_lite::pin_project! {
         T: Service<BatchControl<Request>>,
         T::Error: Into<crate::BoxError>,
     {
-        rx: mpsc::UnboundedReceiver<Message<Request, T::Future>>,
         service: T,
-        max_size: usize,
-        max_time: Duration,
-        handle: Handle,
-        current_message: Option<Message<Request, T::Future>>,
-        close: Option<Weak<Semaphore>>,
-        failed: Option<ServiceError>,
-        finish: bool,
-        batch_until: Option<Instant>,
-        batch_size: usize,
-        sleep: Option<Pin<Box<Sleep>>>
-    }
-
-    impl<T, Request> PinnedDrop for Worker<T, Request>
-    where
-        T: Service<BatchControl<Request>>,
-        T::Error: Into<crate::BoxError>
-    {
-        fn drop(mut this: Pin<&mut Self>) {
-            this.as_mut().close_semaphore();
-        }
+        bridge: Bridge<T::Future, Request>,
+        lot: Lot<T::Future>,
+        #[pin]
+        state: State<T::Future>,
     }
 }
 
 // ===== impl Worker =====
-
-impl<T, Request> Worker<T, Request>
-where
-    T: Service<BatchControl<Request>>,
-    T::Error: Into<crate::BoxError>,
-{
-    /// Closes the buffer's semaphore if it is still open, waking any pending tasks.
-    fn close_semaphore(&mut self) {
-        if let Some(close) = self.close.take().as_ref().and_then(Weak::<Semaphore>::upgrade) {
-            tracing::debug!("buffer closing; waking pending tasks");
-            close.close();
-        } else {
-            tracing::trace!("buffer already closed");
-        }
-    }
-}
 
 impl<T, Request> Worker<T, Request>
 where
@@ -95,7 +97,7 @@ where
         max_time: Duration,
         semaphore: &Arc<Semaphore>,
     ) -> (Handle, Worker<T, Request>) {
-        tracing::trace!("creating Batch worker");
+        trace!("creating Batch worker");
 
         let handle = Handle {
             inner: Arc::new(Mutex::new(None)),
@@ -106,27 +108,188 @@ where
         // never be deallocated.
         let semaphore = Arc::downgrade(semaphore);
         let worker = Self {
-            rx,
             service,
-            max_size,
-            max_time,
-
-            handle: handle.clone(),
-            close: Some(semaphore),
-            failed: None,
-            finish: false,
-            current_message: None,
-
-            batch_until: None,
-            batch_size: 0,
-            sleep: None,
+            bridge: Bridge {
+                rx,
+                current_message: None,
+                handle: handle.clone(),
+                close: Some(semaphore),
+                failed: None,
+            },
+            lot: Lot::new(max_size, max_time),
+            state: State::Collecting,
         };
 
         (handle, worker)
     }
+}
 
-    fn failed(&mut self, error: crate::BoxError) {
-        tracing::debug!({ %error }, "service failed");
+impl<T, Request> Future for Worker<T, Request>
+where
+    T: Service<BatchControl<Request>>,
+    T::Error: Into<crate::BoxError>,
+{
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        trace!("polling worker");
+
+        let mut this = self.project();
+
+        // Flush if the max wait time is reached.
+        if let Poll::Ready(Some(())) = this.lot.poll_max_time(cx) {
+            this.state.set(State::flushing("time".to_owned(), None))
+        }
+
+        loop {
+            match this.state.as_mut().project() {
+                StateProj::Collecting => {
+                    match ready!(this.bridge.poll_next_msg(cx)) {
+                        Some((msg, first)) => {
+                            let _guard = msg.span.enter();
+
+                            trace!(resumed = !first, message = "worker received request");
+
+                            // Wait for the service to be ready
+                            trace!(message = "waiting for service readiness");
+                            match this.service.poll_ready(cx) {
+                                Poll::Ready(Ok(())) => {
+                                    debug!(service.ready = true, message = "adding item");
+
+                                    let response = this.service.call(msg.request.into());
+                                    this.lot.add((msg.tx, Ok(response)));
+
+                                    // Flush if the batch is full.
+                                    if this.lot.is_full() {
+                                        this.state.set(State::flushing("size".to_owned(), None));
+                                    }
+
+                                    // Or flush if the max time has elapsed.
+                                    if this.lot.poll_max_time(cx).is_ready() {
+                                        this.state.set(State::flushing("time".to_owned(), None));
+                                    }
+                                }
+                                Poll::Pending => {
+                                    drop(_guard);
+                                    debug!(service.ready = false, message = "delay item addition");
+                                    this.bridge.return_msg(msg);
+                                    return Poll::Pending;
+                                }
+                                Poll::Ready(Err(e)) => {
+                                    drop(_guard);
+                                    this.bridge.failed("item addition", e.into());
+                                    if let Some(ref e) = this.bridge.failed {
+                                        // Ensure the current caller is notified too.
+                                        this.lot.add((msg.tx, Err(e.clone())));
+                                        this.lot.notify(Some(e.clone()));
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            trace!("shutting down, no more requests _ever_");
+                            this.state.set(State::Finished);
+                            return Poll::Ready(());
+                        }
+                    }
+                }
+                StateProj::Flushing { reason, flush_fut } => match flush_fut.as_pin_mut() {
+                    None => {
+                        trace!(
+                            reason = reason.as_mut().unwrap().as_str(),
+                            message = "waiting for service readiness"
+                        );
+                        match this.service.poll_ready(cx) {
+                            Poll::Ready(Ok(())) => {
+                                debug!(
+                                    service.ready = true,
+                                    reason = reason.as_mut().unwrap().as_str(),
+                                    message = "flushing batch"
+                                );
+                                let response = this.service.call(BatchControl::Flush);
+                                let reason = reason.take().expect("missing reason");
+                                this.state.set(State::flushing(reason, Some(response)));
+                            }
+                            Poll::Pending => {
+                                debug!(
+                                    service.ready = false,
+                                    reason = reason.as_mut().unwrap().as_str(),
+                                    message = "delay flush"
+                                );
+                                return Poll::Pending;
+                            }
+                            Poll::Ready(Err(e)) => {
+                                this.bridge.failed("flush", e.into());
+                                if let Some(ref e) = this.bridge.failed {
+                                    this.lot.notify(Some(e.clone()));
+                                }
+                            }
+                        }
+                    }
+                    Some(future) => {
+                        match ready!(future.poll(cx)) {
+                            Ok(_) => {
+                                debug!(reason = reason.as_mut().unwrap().as_str(), "batch flushed");
+                                this.lot.notify(None);
+                                this.state.set(State::Collecting)
+                            },
+                            Err(e) => {
+                                this.bridge.failed("flush", e.into());
+                                if let Some(ref e) = this.bridge.failed {
+                                    this.lot.notify(Some(e.clone()));
+                                }
+                                this.state.set(State::Finished);
+                                return Poll::Ready(());
+                            }
+                        }
+                    }
+                },
+                StateProj::Finished => {
+                    // We've already received None and are shutting down
+                    return Poll::Ready(());
+                }
+            }
+        }
+    }
+}
+
+// ===== impl State =====
+
+impl<Fut> State<Fut> {
+    fn flushing(reason: String, f: Option<Fut>) -> Self {
+        Self::Flushing {
+            reason: Some(reason),
+            flush_fut: f,
+        }
+    }
+}
+
+// ===== impl Bridge =====
+
+impl<Fut, Request> Drop for Bridge<Fut, Request> {
+    fn drop(&mut self) {
+        self.close_semaphore()
+    }
+}
+
+impl<Fut, Request> Bridge<Fut, Request> {
+    /// Closes the buffer's semaphore if it is still open, waking any pending tasks.
+    fn close_semaphore(&mut self) {
+        if let Some(close) = self
+            .close
+            .take()
+            .as_ref()
+            .and_then(Weak::<Semaphore>::upgrade)
+        {
+            debug!("buffer closing; waking pending tasks");
+            close.close();
+        } else {
+            trace!("buffer already closed");
+        }
+    }
+
+    fn failed(&mut self, action: &str, error: crate::BoxError) {
+        debug!(action,  %error , "service failed");
 
         // The underlying service failed when we called `poll_ready` on it with the given `error`. We
         // need to communicate this to all the `Buffer` handles. To do so, we wrap up the error in
@@ -171,13 +334,8 @@ where
     fn poll_next_msg(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<(Message<Request, T::Future>, bool)>> {
-        tracing::trace!("worker polling for next message");
-
-        if self.finish {
-            // We've already received None and are shutting down
-            return Poll::Ready(None);
-        }
+    ) -> Poll<Option<(Message<Request, Fut>, bool)>> {
+        trace!("worker polling for next message");
 
         // Pick any delayed request first
         if let Some(msg) = self.current_message.take() {
@@ -185,166 +343,88 @@ where
             // and nobody cares about the response. If this is the case, we
             // should continue to the next request.
             if !msg.tx.is_closed() {
-                tracing::trace!("resuming buffered request");
+                trace!("resuming buffered request");
                 return Poll::Ready(Some((msg, false)));
             }
 
-            tracing::trace!("dropping cancelled buffered request");
+            trace!("dropping cancelled buffered request");
         }
 
         // Get the next request
         while let Some(msg) = ready!(Pin::new(&mut self.rx).poll_recv(cx)) {
             if !msg.tx.is_closed() {
-                tracing::trace!("processing new request");
+                trace!("processing new request");
                 return Poll::Ready(Some((msg, true)));
             }
+
             // Otherwise, request is canceled, so pop the next one.
-            tracing::trace!("dropping cancelled request");
+            trace!("dropping cancelled request");
         }
 
         Poll::Ready(None)
     }
 
-    fn flush(&mut self, cx: &mut Context<'_>, reason: &str) -> Poll<()> {
-        tracing::trace!(reason, message = "waiting for service readiness");
-        match self.service.poll_ready(cx) {
-            Poll::Ready(Ok(())) => {
-                tracing::debug!(service.ready = true, reason, message = "flushing batch");
-
-                let response = self.service.call(BatchControl::Flush);
-                tokio::pin!(response);
-                if let Err(e) = ready!(response.poll(cx)) {
-                    self.failed(e.into());
-                }
-
-                tracing::trace!("preparing for next batch");
-                self.batch_size = 0;
-                self.batch_until = None;
-                self.sleep = None;
-            }
-            Poll::Pending => {
-                tracing::trace!(service.ready = false, reason, message = "delay flush");
-                return Poll::Pending;
-            }
-            Poll::Ready(Err(e)) => {
-                self.failed(e.into());
-            }
-        }
-
-        Poll::Ready(())
+    fn return_msg(&mut self, msg: Message<Request, Fut>) {
+        self.current_message = Some(msg)
     }
 }
 
-impl<T, Request> Future for Worker<T, Request>
-where
-    T: Service<BatchControl<Request>>,
-    T::Error: Into<crate::BoxError>,
-{
-    type Output = ();
+// ===== impl Lot =====
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        tracing::trace!("polling Batch worker");
+impl<Fut> Lot<Fut> {
+    fn new(max_size: usize, max_time: Duration) -> Self {
+        Self {
+            max_size,
+            max_time,
+            responses: Vec::with_capacity(max_size),
+            expires: None,
+            closed: false,
+        }
+    }
 
-        if self.finish {
-            return Poll::Ready(());
+    fn poll_max_time(&mut self, cx: &mut Context<'_>) -> Poll<Option<()>> {
+        // CORRECTNESS
+
+        // The close prevents an endless loop of entering the Flushing state.
+        // The first time the Worker future is awaken because the Sleep woke it
+        // up the Poll should complete, any subsequent calls will receive Pending
+        if self.closed {
+            return Poll::Ready(None);
         }
 
-        // The timer is started when the first entry of a new batch is
-        // submitted, so that the batch latency of all entries is at most
-        // self.max_time. However, we don't keep the timer running unless
-        // there is a pending request to prevent wakeups on idle services.
-        if let Some(ts) = self.batch_until {
-            let now = Instant::now();
-            if ts <= now {
-                tracing::trace!("time expired, flushing");
-                let _ = ready!(self.flush(cx, "time"));
+        if let Some(ref mut sleep) = self.expires {
+            if Pin::new(sleep).poll(cx).is_ready() {
+                self.closed = true;
+                return Poll::Ready(Some(()));
             }
         }
 
-        // Attempt to flush the batch again when a previous flush was delayed,
-        // because the service was not available,
-        if self.batch_size == self.max_size {
-            let _ = ready!(self.flush(cx, "size"));
+        Poll::Pending
+    }
+
+    fn is_full(&self) -> bool {
+        self.responses.len() == self.max_size
+    }
+
+    fn add(&mut self, item: (Tx<Fut>, Result<Fut, ServiceError>)) {
+        if self.responses.is_empty() {
+            self.expires = Some(Box::pin(sleep_until(
+                Instant::now().add(self.max_time).into(),
+            )));
         }
+        self.responses.push(item);
+    }
 
-        loop {
-            match ready!(self.poll_next_msg(cx)) {
-                Some((msg, first)) => {
-                    let _guard = msg.span.enter();
-                    if let Some(ref failed) = self.failed {
-                        tracing::trace!("notifying caller about worker failure");
-                        let _ = msg.tx.send(Err(failed.clone()));
-                        continue;
-                    }
-
-                    tracing::trace!(
-                        batch_size = &self.batch_size,
-                        batch_time = ?self.batch_until.map(|time| time.duration_since(Instant::now())),
-                        resumed = !first,
-                        message = "worker received request"
-                    );
-
-                    // The first message in a new batch.
-                    if self.batch_size == 0 {
-                        // Set the batch timer
-                        tracing::trace!("buffer empty; starting 'max time' wake-up timer");
-                        self.sleep = Some(Box::pin(sleep(self.max_time)));
-                        self.batch_until = Some(Instant::now().add(self.max_time));
-                    }
-
-                    // Wait for the service to be ready
-                    tracing::trace!(resumed = !first, message = "waiting for service readiness");
-                    match self.service.poll_ready(cx) {
-                        Poll::Ready(Ok(())) => {
-                            tracing::debug!(service.ready = true, message = "adding item");
-
-                            let response = self.service.call(msg.request.into());
-                            self.batch_size += 1;
-
-                            // Send the response future back to the sender.
-                            //
-                            // An error means the request had been canceled in-between
-                            // our calls, the response future will just be dropped.
-                            tracing::trace!("returning response future");
-                            let _ = msg.tx.send(Ok(response));
-
-                            // TODO: Should we discard the failed futures?
-                            if self.batch_size == self.max_size {
-                                let _ = ready!(self.flush(cx, "size"));
-                            }
-
-                            if let Some(ref mut sleep) = self.sleep {
-                                if Pin::new(sleep).poll(cx).is_ready() {
-                                    tracing::trace!("max time reached; waking the worker");
-                                }
-                            }
-                        }
-                        Poll::Pending => {
-                            tracing::trace!(service.ready = false, message = "delay item addition");
-                            // Put out current message back in its slot.
-                            drop(_guard);
-                            self.current_message = Some(msg);
-                            return Poll::Pending;
-                        }
-                        Poll::Ready(Err(e)) => {
-                            drop(_guard);
-                            self.failed(e.into());
-                            let _ = msg.tx.send(Err(self
-                                .failed
-                                .as_ref()
-                                .expect("Worker::failed did not set self.failed?")
-                                .clone()));
-                        }
-                    }
-                }
-                // Shutting down, no more requests _ever_.
-                None => {
-                    tracing::trace!("shutting down, no more requests _ever_");
-                    self.finish = true;
-                    return Poll::Ready(());
-                }
+    fn notify(&mut self, err: Option<ServiceError>) {
+        for (tx, response) in mem::replace(&mut self.responses, Vec::with_capacity(self.max_size)) {
+            if let Some(ref response) = err {
+                let _ = tx.send(Err(response.clone()));
+            } else {
+                let _ = tx.send(response);
             }
         }
+        self.expires = None;
+        self.closed = false;
     }
 }
 

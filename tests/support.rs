@@ -21,7 +21,6 @@ pub fn trace_init() -> tracing::subscriber::DefaultGuard {
 #[derive(Clone, Debug)]
 pub struct AssertSpanSvc {
     span: tracing::Span,
-    polled: bool,
 }
 
 pub struct AssertSpanError(String);
@@ -42,10 +41,7 @@ impl std::error::Error for AssertSpanError {}
 
 impl AssertSpanSvc {
     pub fn new(span: tracing::Span) -> Self {
-        Self {
-            span,
-            polled: false,
-        }
+        Self { span }
     }
 
     /// Verifies the Service propagates the current Span to the Worker.
@@ -72,17 +68,14 @@ impl Service<BatchControl<()>> for AssertSpanSvc {
     type Error = AssertSpanError;
     type Future = future::Ready<Result<Self::Response, Self::Error>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.polled {
-            return Poll::Ready(self.check("poll_ready"));
-        }
-
-        cx.waker().wake_by_ref();
-        self.polled = true;
-        Poll::Pending
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, _: BatchControl<()>) -> Self::Future {
+    fn call(&mut self, req: BatchControl<()>) -> Self::Future {
+        if req == BatchControl::Flush {
+            return future::ready(Ok(()));
+        }
         future::ready(self.check("call"))
     }
 }
