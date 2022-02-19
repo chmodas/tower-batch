@@ -1,7 +1,19 @@
 [package]
 name = "tower-batch"
 version = "0.1.0"
-edition = "2021"
+edition = "2018"
+authors = ["Borislav Borisov <chmodas@astutebits.com>"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/chmodas/tower-batch"
+homepage = "https://github.com/chmodas/tower-batch"
+description = """
+`batch-tower` is a Tower middleware that allows you to buffer requests for batch processing
+until the buffer reaches a maximum size OR a maximum duration elapses.
+"""
+categories = ["asynchronous", "network-programming"]
+keywords = ["io", "async", "non-blocking", "futures", "service"]
+rust-version = "1.49.0"
 
 [dependencies]
 
