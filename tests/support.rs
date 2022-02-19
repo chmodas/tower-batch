@@ -46,9 +46,9 @@ impl AssertSpanSvc {
 
     /// Verifies the Service propagates the current Span to the Worker.
     ///
-    // Get the current Span so that we can explicitly propagate it to the worker
-    // if we didn't do this, events on the worker related to this span wouldn't be counted
-    // towards that span since the worker would have no way of entering it.
+    // Get the current Span so that we can explicitly propagate it to the worker if we didn't do
+    // this, events on the worker related to this span wouldn't be counted towards that span since
+    // the worker would have no way of entering it.
     fn check(&self, func: &str) -> Result<(), AssertSpanError> {
         let current_span = tracing::Span::current();
         tracing::debug!(?current_span, ?self.span, %func);

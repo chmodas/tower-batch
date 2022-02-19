@@ -43,8 +43,8 @@ struct Lot<Fut> {
     max_size: usize,
     max_time: Duration,
     responses: Vec<(Tx<Fut>, Result<Fut, ServiceError>)>,
-    expires: Option<Pin<Box<Sleep>>>,
-    closed: bool,
+    time_elapses: Option<Pin<Box<Sleep>>>,
+    time_elapsed: bool,
 }
 
 pin_project_lite::pin_project! {
@@ -291,9 +291,9 @@ impl<Fut, Request> Bridge<Fut, Request> {
     fn failed(&mut self, action: &str, error: crate::BoxError) {
         debug!(action,  %error , "service failed");
 
-        // The underlying service failed when we called `poll_ready` on it with the given `error`. We
-        // need to communicate this to all the `Buffer` handles. To do so, we wrap up the error in
-        // an `Arc`, send that `Arc<E>` to all pending requests, and store it so that subsequent
+        // The underlying service failed when we called `poll_ready` on it with the given `error`.
+        // We need to communicate this to all the `Buffer` handles. To do so, we wrap up the error
+        // in an `Arc`, send that `Arc<E>` to all pending requests, and store it so that subsequent
         // requests will also fail with the same error.
 
         // Note that we need to handle the case where some handle is concurrently trying to send us
@@ -320,10 +320,9 @@ impl<Fut, Request> Bridge<Fut, Request> {
         // Wake any tasks waiting on channel capacity.
         self.close_semaphore();
 
-        // By closing the mpsc::Receiver, we know that that the run() loop will
-        // drain all pending requests. We just need to make sure that any
-        // requests that we receive before we've exhausted the receiver receive
-        // the error:
+        // By closing the mpsc::Receiver, we know that that the run() loop will drain all pending
+        // requests. We just need to make sure that any requests that we receive before we've
+        // exhausted the receiver receive the error:
         self.failed = Some(error);
     }
 
@@ -339,9 +338,8 @@ impl<Fut, Request> Bridge<Fut, Request> {
 
         // Pick any delayed request first
         if let Some(msg) = self.current_message.take() {
-            // If the oneshot sender is closed, then the receiver is dropped,
-            // and nobody cares about the response. If this is the case, we
-            // should continue to the next request.
+            // If the oneshot sender is closed, then the receiver is dropped, and nobody cares about
+            // the response. If this is the case, we should continue to the next request.
             if !msg.tx.is_closed() {
                 trace!("resuming buffered request");
                 return Poll::Ready(Some((msg, false)));
@@ -377,24 +375,23 @@ impl<Fut> Lot<Fut> {
             max_size,
             max_time,
             responses: Vec::with_capacity(max_size),
-            expires: None,
-            closed: false,
+            time_elapses: None,
+            time_elapsed: false,
         }
     }
 
     fn poll_max_time(&mut self, cx: &mut Context<'_>) -> Poll<Option<()>> {
-        // CORRECTNESS
-
-        // The close prevents an endless loop of entering the Flushing state.
-        // The first time the Worker future is awaken because the Sleep woke it
-        // up the Poll should complete, any subsequent calls will receive Pending
-        if self.closed {
+        // When the Worker is polled and the time has elapsed, we return `Some` to let the Worker
+        // know it's time to enter the Flushing state. Subsequent polls (e.g. by the Flush future)
+        // will return None to prevent the Worker from getting stuck in an endless loop of entering
+        // the Flushing state.
+        if self.time_elapsed {
             return Poll::Ready(None);
         }
 
-        if let Some(ref mut sleep) = self.expires {
+        if let Some(ref mut sleep) = self.time_elapses {
             if Pin::new(sleep).poll(cx).is_ready() {
-                self.closed = true;
+                self.time_elapsed = true;
                 return Poll::Ready(Some(()));
             }
         }
@@ -408,7 +405,7 @@ impl<Fut> Lot<Fut> {
 
     fn add(&mut self, item: (Tx<Fut>, Result<Fut, ServiceError>)) {
         if self.responses.is_empty() {
-            self.expires = Some(Box::pin(sleep_until(
+            self.time_elapses = Some(Box::pin(sleep_until(
                 Instant::now().add(self.max_time).into(),
             )));
         }
@@ -423,8 +420,8 @@ impl<Fut> Lot<Fut> {
                 let _ = tx.send(response);
             }
         }
-        self.expires = None;
-        self.closed = false;
+        self.time_elapses = None;
+        self.time_elapsed = false;
     }
 }
 

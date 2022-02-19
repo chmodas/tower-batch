@@ -132,14 +132,13 @@ where
             return Poll::Ready(Ok(()));
         }
 
-        // Finally, if we haven't already acquired a permit, poll the semaphore
-        // to acquire one. If we acquire a permit, then there's enough buffer
-        // capacity to send a new request. Otherwise, we need to wait for
-        // capacity.
+        // Finally, if we haven't already acquired a permit, poll the semaphore to acquire one. If
+        // we acquire a permit, then there's enough buffer capacity to send a new request.
+        // Otherwise, we need to wait for capacity.
         //
-        // The current task must be scheduled for wakeup every time we return
-        // `Poll::Pending`. If it returns Pending, the semaphore also schedules
-        // the task for wakeup when the next permit is available.
+        // The current task must be scheduled for wakeup every time we return `Poll::Pending`. If
+        // it returns Pending, the semaphore also schedules the task for wakeup when the next permit
+        // is available.
         let permit =
             ready!(self.semaphore.poll_acquire(cx)).ok_or_else(|| self.get_worker_error())?;
         self.permit = Some(permit);
@@ -160,8 +159,8 @@ where
         // towards that span since the worker would have no way of entering it.
         let span = tracing::Span::current();
 
-        // If we've made it here, then a semaphore permit has already been
-        // acquired, so we can freely allocate a oneshot.
+        // If we've made it here, then a semaphore permit has already been acquired, so we can
+        // freely allocate a oneshot.
         let (tx, rx) = oneshot::channel();
 
         // The worker is in control of completing the request now.
@@ -187,8 +186,7 @@ where
             semaphore: self.semaphore.clone(),
             handle: self.handle.clone(),
 
-            // The new clone hasn't acquired a permit yet. It will when it's
-            // next polled ready.
+            // The new clone hasn't acquired a permit yet. It will when it's next polled ready.
             permit: None,
         }
     }
