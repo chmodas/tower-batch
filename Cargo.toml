@@ -15,6 +15,12 @@ categories = ["asynchronous", "network-programming"]
 keywords = ["io", "async", "non-blocking", "futures", "service"]
 rust-version = "1.49.0"
 
+exclude = [
+  ".gitignore",
+  ".github",
+  "README.md"
+]
+
 [dependencies]
 
 futures-core = "0.3.21"
