@@ -6,7 +6,7 @@ until the buffer reaches a maximum size OR a maximum duration elapses.
 
 ## License
 
-This project is licensed under the [MIT license](LICENSE).
+This project is licensed under the [MIT](LICENSE-MIT) and the [APACHE](LICENSE-APACHE) licenses.
 
 ### Contribution
 
