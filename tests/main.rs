@@ -572,7 +572,7 @@ async fn propagates_trace_spans() -> Result<(), BoxError> {
 
     let result: JoinHandle<Result<(), tower_batch::BoxError>> = tokio::spawn(async move {
         service.ready().await?;
-        let _ = service.call(()).await?;
+        service.call(()).await?;
         Ok(())
     });
 
