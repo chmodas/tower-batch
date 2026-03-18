@@ -22,13 +22,21 @@ use super::{
     BatchControl,
 };
 
-/// Get the error out
+/// Shared error state between [`Batch`](crate::Batch) (client) and [`Worker`].
+///
+/// When the worker's inner service fails, the error is stored here so that
+/// `Batch::poll_ready` can retrieve it and propagate it to callers.
 #[derive(Debug)]
 pub(crate) struct Handle {
     inner: Arc<Mutex<Option<ServiceError>>>,
 }
 
-/// Wrap `Service` channel for easier use through projections.
+/// Manages the message channel between [`Batch`](crate::Batch) handles and the [`Worker`].
+///
+/// Receives incoming requests from the unbounded mpsc channel, holds on to a
+/// message when the inner service is not ready (`current_message`), and
+/// propagates errors by storing them in the shared [`Handle`] and closing the
+/// semaphore so that all waiting `Batch` handles are woken.
 #[derive(Debug)]
 struct Bridge<Fut, Request> {
     rx: mpsc::UnboundedReceiver<Message<Request, Fut>>,
@@ -38,6 +46,11 @@ struct Bridge<Fut, Request> {
     failed: Option<ServiceError>,
 }
 
+/// Accumulates batch items with their oneshot response senders.
+///
+/// Tracks the max-time timer (started when the first item arrives) and
+/// dispatches results — or errors — to all collected senders on flush via
+/// [`notify`](Lot::notify).
 #[derive(Debug)]
 struct Lot<Fut> {
     max_size: usize,
@@ -47,6 +60,13 @@ struct Lot<Fut> {
     time_elapsed: bool,
 }
 
+// Worker state machine.
+//
+// Transitions:
+// - `Collecting` → `Flushing`: batch is full (size) or max time elapsed.
+// - `Flushing` → `Collecting`: flush succeeded, ready for new items.
+// - `Flushing` → `Finished`: flush failed, worker terminates.
+// - `Collecting` → `Finished`: channel closed, no more requests.
 pin_project_lite::pin_project! {
     #[project = StateProj]
     #[derive(Debug)]

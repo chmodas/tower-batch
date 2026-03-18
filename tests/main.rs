@@ -44,6 +44,17 @@ impl<T> Aggregator<T> {
         let items = &self.items.lock().unwrap();
         items.get(index).map(|v| v.len() == size).unwrap_or(false)
     }
+
+    fn batch_items(&self, index: usize) -> Option<Vec<T>>
+    where
+        T: Clone,
+    {
+        if index == self.current.load(Ordering::Acquire) {
+            return None;
+        }
+        let items = self.items.lock().unwrap();
+        items.get(index).cloned()
+    }
 }
 
 impl<T> Service<BatchControl<T>> for Aggregator<T>
@@ -73,7 +84,7 @@ where
             }
             BatchControl::Flush => {
                 self.current
-                    .fetch_add(self.current.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    .fetch_add(1, Ordering::SeqCst);
                 return Box::pin(async {
                     tracing::info!("sleeping ...");
                     async {
@@ -142,6 +153,187 @@ async fn batch_flushes_on_elapsed_time() -> Result<(), BoxError> {
     assert!(aggregator.batch_has_size(0, 10));
 
     Ok(())
+}
+
+#[tokio::test]
+async fn batch_flushes_multiple_times() -> Result<(), BoxError> {
+    let _guard = support::trace_init();
+
+    let aggregator: Aggregator<u32> = Aggregator::new();
+    let mut batch = Batch::new(aggregator.clone(), 10, Duration::from_secs(1));
+
+    let mut results = FuturesUnordered::new();
+
+    for i in 0..20 {
+        let span = tracing::trace_span!("msg", i);
+        batch.ready().await?;
+        results.push(span.in_scope(|| batch.call(i)));
+    }
+
+    while let Some(Ok(_)) = results.next().await {}
+
+    assert!(aggregator.batch_has_size(0, 10));
+    assert!(aggregator.batch_has_size(1, 10));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn batch_items_are_ordered() -> Result<(), BoxError> {
+    let _guard = support::trace_init();
+
+    let aggregator: Aggregator<u32> = Aggregator::new();
+    let mut batch = Batch::new(aggregator.clone(), 10, Duration::from_secs(1));
+
+    let mut results = FuturesUnordered::new();
+
+    for i in 0..10 {
+        batch.ready().await?;
+        results.push(batch.call(i));
+    }
+
+    while let Some(Ok(_)) = results.next().await {}
+
+    let items = aggregator.batch_items(0).expect("batch 0 should exist");
+    assert_eq!(items, (0..10).collect::<Vec<u32>>());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_clones_send_requests() -> Result<(), BoxError> {
+    let _guard = support::trace_init();
+
+    let aggregator: Aggregator<u32> = Aggregator::new();
+    let batch = Batch::new(aggregator.clone(), 10, Duration::from_secs(1));
+
+    let mut handles = FuturesUnordered::new();
+
+    for clone_id in 0..3u32 {
+        let mut svc = batch.clone();
+        handles.push(tokio::spawn(async move {
+            let mut results = Vec::new();
+            for i in 0..3 {
+                svc.ready().await.unwrap();
+                results.push(svc.call(clone_id * 10 + i).await);
+            }
+            results
+        }));
+    }
+
+    let mut total = 0usize;
+    while let Some(result) = handles.next().await {
+        let results = result.unwrap();
+        for r in results {
+            r.unwrap();
+            total += 1;
+        }
+    }
+
+    assert_eq!(total, 9);
+
+    // Drop the Batch handle so the worker can shut down and flush remaining items.
+    drop(batch);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Verify all 9 items were actually delivered to the aggregator.
+    let items = aggregator.items.lock().unwrap();
+    let delivered: usize = items.iter().map(|batch| batch.len()).sum();
+    assert_eq!(delivered, 9, "all 9 items should reach the aggregator");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn time_based_flush_triggers_multiple_batches() -> Result<(), BoxError> {
+    let _guard = support::trace_init();
+
+    // Large max_size so flushes are triggered only by the short max_time.
+    let aggregator: Aggregator<u32> = Aggregator::new();
+    let mut batch = Batch::new(aggregator.clone(), 100, Duration::from_millis(100));
+
+    // First group: send all items, then await responses (flush fires on time).
+    let mut results = FuturesUnordered::new();
+    for i in 0..3 {
+        batch.ready().await?;
+        results.push(batch.call(i));
+    }
+    while let Some(Ok(_)) = results.next().await {}
+    // Give the flush time to complete.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    // Second group
+    let mut results = FuturesUnordered::new();
+    for i in 10..13 {
+        batch.ready().await?;
+        results.push(batch.call(i));
+    }
+    while let Some(Ok(_)) = results.next().await {}
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    assert!(
+        aggregator.batch_has_size(0, 3),
+        "first time-based batch should have 3 items"
+    );
+    assert!(
+        aggregator.batch_has_size(1, 3),
+        "second time-based batch should have 3 items"
+    );
+
+    let b0 = aggregator.batch_items(0).unwrap();
+    assert_eq!(b0, vec![0, 1, 2]);
+    let b1 = aggregator.batch_items(1).unwrap();
+    assert_eq!(b1, vec![10, 11, 12]);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_clones_with_backpressure() {
+    let _guard = support::trace_init();
+
+    let (mut service, mut handle) = mock::spawn_with(|s: Mock<BatchControl<&str>, &str>| {
+        // batch size 2, so after 2 items the semaphore is exhausted
+        let (svc, worker) = Batch::pair(s, 2, Duration::from_secs(1));
+
+        tokio::spawn(async move {
+            let _guard = support::trace_init();
+            let mut fut = tokio_test::task::spawn(worker);
+            while fut.poll().is_pending() {}
+        });
+
+        svc
+    });
+
+    let mut service2 = service.clone();
+
+    // Inner service starts not ready — creates back-pressure.
+    handle.allow(0);
+
+    // Clone 1 sends a request; it will be buffered but the inner service won't accept it yet.
+    assert_ready_ok!(service.poll_ready());
+    let mut res1 = task::spawn(service.call("from_clone1"));
+
+    // Clone 2 also sends a request.
+    assert_ready_ok!(service2.poll_ready());
+    let mut res2 = task::spawn(service2.call("from_clone2"));
+
+    // Let the worker attempt to process (it can't — inner service not ready).
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_pending!(res1.poll());
+    assert_pending!(res2.poll());
+
+    // Now allow the inner service to accept requests + flush.
+    handle.allow(4);
+
+    assert_request_eq!(handle, BatchControl::from("from_clone1")).send_response("resp1");
+    assert_request_eq!(handle, BatchControl::from("from_clone2")).send_response("resp2");
+    assert_request_eq!(handle, BatchControl::Flush).send_response("flushed");
+
+    // Let the worker deliver responses.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(assert_ready_ok!(res1.poll()), "resp1");
+    assert_eq!(assert_ready_ok!(res2.poll()), "resp2");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -483,7 +675,7 @@ async fn wakes_pending_waiters_on_close() -> Result<(), BoxError> {
         ready2.is_woken(),
         "dropping worker should wake ready task 2"
     );
-    let err = assert_ready_err!(ready1.poll());
+    let err = assert_ready_err!(ready2.poll());
     assert!(
         err.is::<error::Closed>(),
         "ready 2 should fail with a Closed, got: {:?}",
@@ -544,7 +736,7 @@ async fn wakes_pending_waiters_on_failure() -> Result<(), BoxError> {
         ready2.is_woken(),
         "dropping worker should wake ready task 2"
     );
-    let err = assert_ready_err!(ready1.poll());
+    let err = assert_ready_err!(ready2.poll());
     assert!(
         err.is::<error::ServiceError>(),
         "ready 2 should fail with a ServiceError, got: {:?}",
