@@ -226,23 +226,21 @@ where
                             }
                         }
                     }
-                    Some(future) => {
-                        match ready!(future.poll(cx)) {
-                            Ok(_) => {
-                                debug!(reason = reason.as_mut().unwrap().as_str(), "batch flushed");
-                                this.lot.notify(None);
-                                this.state.set(State::Collecting)
-                            },
-                            Err(e) => {
-                                this.bridge.failed("flush", e.into());
-                                if let Some(ref e) = this.bridge.failed {
-                                    this.lot.notify(Some(e.clone()));
-                                }
-                                this.state.set(State::Finished);
-                                return Poll::Ready(());
-                            }
+                    Some(future) => match ready!(future.poll(cx)) {
+                        Ok(_) => {
+                            debug!(reason = reason.as_mut().unwrap().as_str(), "batch flushed");
+                            this.lot.notify(None);
+                            this.state.set(State::Collecting)
                         }
-                    }
+                        Err(e) => {
+                            this.bridge.failed("flush", e.into());
+                            if let Some(ref e) = this.bridge.failed {
+                                this.lot.notify(Some(e.clone()));
+                            }
+                            this.state.set(State::Finished);
+                            return Poll::Ready(());
+                        }
+                    },
                 },
                 StateProj::Finished => {
                     // We've already received None and are shutting down
