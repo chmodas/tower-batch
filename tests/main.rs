@@ -13,13 +13,13 @@ use std::{
 use futures::{stream::FuturesUnordered, StreamExt};
 use tokio::task::JoinHandle;
 use tokio_test::{assert_pending, assert_ready, assert_ready_err, assert_ready_ok, task};
-use tower::{Service, ServiceExt};
+use tower::{layer::Layer, Service, ServiceExt};
 use tower_test::{
     assert_request_eq,
     mock::{self, Mock},
 };
 
-use tower_batch::{error, Batch, BatchControl, BoxError};
+use tower_batch::{error, Batch, BatchControl, BatchLayer, BoxError};
 
 mod support;
 
@@ -83,8 +83,7 @@ where
                 }
             }
             BatchControl::Flush => {
-                self.current
-                    .fetch_add(1, Ordering::SeqCst);
+                self.current.fetch_add(1, Ordering::SeqCst);
                 return Box::pin(async {
                     tracing::info!("sleeping ...");
                     async {
@@ -821,4 +820,215 @@ async fn doesnt_leak_permits() {
     // Now, the third service should acquire a permit...
     assert!(ready3.is_woken());
     assert_ready_ok!(ready3.poll());
+}
+
+// === New coverage tests ===
+
+#[tokio::test]
+async fn batch_layer_wraps_service() {
+    let _guard = support::trace_init();
+
+    let aggregator: Aggregator<u32> = Aggregator::new();
+    let layer = BatchLayer::<u32>::new(10, Duration::from_secs(1));
+
+    // Cover Debug impl (prints "BufferLayer")
+    let debug_str = format!("{:?}", layer);
+    assert!(
+        debug_str.contains("BufferLayer"),
+        "Debug should contain 'BufferLayer', got: {}",
+        debug_str
+    );
+
+    // Cover Layer::layer() which delegates to Batch::new()
+    let mut service = layer.layer(aggregator.clone());
+    service.ready().await.unwrap();
+    service.call(42).await.unwrap();
+
+    // Give time for the flush
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert!(
+        aggregator.batch_has_size(0, 1),
+        "layer-created service should deliver the item"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn error_display_and_debug_formatting() {
+    use std::error::Error as StdError;
+
+    let _guard = support::trace_init();
+
+    // --- Closed: drop worker before poll_ready ---
+    {
+        let (service, _handle) = mock::pair::<BatchControl<()>, ()>();
+        let (service, worker) = Batch::pair(service, 1, Duration::from_secs(1));
+        let mut service = mock::Spawn::new(service);
+
+        drop(worker);
+
+        let err = assert_ready_err!(service.poll_ready());
+        let closed = err
+            .downcast_ref::<error::Closed>()
+            .expect("should be Closed");
+        let debug_str = format!("{:?}", closed);
+        assert!(debug_str.contains("Closed"), "Debug: {}", debug_str);
+        let display_str = format!("{}", closed);
+        assert!(
+            display_str.contains("batch's worker closed unexpectedly"),
+            "Display: {}",
+            display_str
+        );
+    }
+
+    // --- ServiceError: inner service fails ---
+    {
+        let (service, mut handle) = mock::pair::<BatchControl<&str>, &str>();
+        let (service, worker) = Batch::pair(service, 10, Duration::from_secs(1));
+        let mut service = mock::Spawn::new(service);
+        let mut worker = task::spawn(worker);
+
+        handle.allow(0);
+        handle.send_error("boom");
+
+        assert_ready_ok!(service.poll_ready());
+        let mut response = task::spawn(service.call("hello"));
+
+        // Let worker process and fail
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_ready!(worker.poll());
+
+        let err = assert_ready_err!(response.poll());
+        let svc_err = err
+            .downcast_ref::<error::ServiceError>()
+            .expect("should be ServiceError");
+        let display_str = format!("{}", svc_err);
+        assert!(
+            display_str.contains("batch service failed:"),
+            "Display: {}",
+            display_str
+        );
+        // Also check source()
+        let source = svc_err.source().unwrap();
+        assert_eq!(source.to_string(), "boom");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn call_after_worker_death() {
+    let _guard = support::trace_init();
+
+    let (service, _handle) = mock::pair::<BatchControl<&str>, &str>();
+    let (service, worker) = Batch::pair(service, 1, Duration::from_secs(1));
+    let mut service = mock::Spawn::new(service);
+
+    // Acquire permit while worker is still alive
+    assert_ready_ok!(service.poll_ready());
+
+    // Kill the worker — channel receiver is dropped
+    drop(worker);
+
+    // call() tries tx.send() which fails → ResponseFuture::failed()
+    let mut response = task::spawn(service.call("hello"));
+
+    // Exercises ResponseState::Failed arm
+    let err = assert_ready_err!(response.poll());
+    assert!(
+        err.is::<error::Closed>(),
+        "should be Closed, got: {:?}",
+        err
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn flush_phase_poll_ready_failure() {
+    let _guard = support::trace_init();
+
+    let (service, mut handle) = mock::pair::<BatchControl<&str>, &str>();
+    let (service, worker) = Batch::pair(service, 2, Duration::from_secs(1));
+    let mut service = mock::Spawn::new(service);
+    let mut worker = task::spawn(worker);
+
+    // Allow inner service to accept 2 items (the batch items)
+    handle.allow(2);
+
+    assert_ready_ok!(service.poll_ready());
+    let mut res1 = task::spawn(service.call("a"));
+
+    assert_ready_ok!(service.poll_ready());
+    let mut res2 = task::spawn(service.call("b"));
+
+    // Worker processes both items, batch is full, enters Flushing { flush_fut: None },
+    // tries poll_ready for Flush — gets Pending (0 allows left)
+    assert_pending!(worker.poll());
+
+    // Respond to item requests
+    assert_request_eq!(handle, BatchControl::from("a")).send_response("ra");
+    assert_request_eq!(handle, BatchControl::from("b")).send_response("rb");
+
+    // Queue an error for the next poll_ready (during flush phase)
+    handle.send_error("flush ready failed");
+
+    // Worker polls again: in Flushing state, poll_ready returns Err → lines 241-247.
+    // Worker transitions to Finished and terminates.
+    assert_ready!(worker.poll());
+
+    // Both response futures should fail with ServiceError (lot.notify was called)
+    let err1 = assert_ready_err!(res1.poll());
+    assert!(
+        err1.is::<error::ServiceError>(),
+        "res1 should be ServiceError, got: {:?}",
+        err1
+    );
+    let err2 = assert_ready_err!(res2.poll());
+    assert!(
+        err2.is::<error::ServiceError>(),
+        "res2 should be ServiceError, got: {:?}",
+        err2
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_request_in_channel() {
+    let _guard = support::trace_init();
+
+    let (service, mut handle) = mock::pair::<BatchControl<&str>, &str>();
+    // Need max_size >= 2 for 2 semaphore permits; use short timer to trigger flush.
+    let (service, worker) = Batch::pair(service, 2, Duration::from_millis(1));
+    let mut service = mock::Spawn::new(service);
+    let mut worker = task::spawn(worker);
+
+    // Do NOT poll worker yet — messages stay in the channel
+
+    // Send request "a" and immediately drop its response future (cancels it)
+    assert_ready_ok!(service.poll_ready());
+    let res_a = task::spawn(service.call("a"));
+    drop(res_a);
+
+    // Send request "b" and keep its response future
+    assert_ready_ok!(service.poll_ready());
+    let mut res_b = task::spawn(service.call("b"));
+
+    // Let inner service accept requests + flush
+    handle.allow(3);
+
+    // First poll: worker enters poll_next_msg while-let loop.
+    // Receives "a" — tx.is_closed() == true — skips (line 377).
+    // Receives "b" — processes normally. Lot timer starts. Batch not full.
+    // Tries to get next message — channel empty → Pending.
+    assert_pending!(worker.poll());
+
+    // Only "b" should reach the mock handle (not "a")
+    assert_request_eq!(handle, BatchControl::from("b")).send_response("rb");
+
+    // Wait for the short max_time to elapse
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Second poll: poll_max_time fires → enters Flushing state
+    assert_pending!(worker.poll());
+
+    assert_request_eq!(handle, BatchControl::Flush).send_response("flushed");
+    assert_pending!(worker.poll());
+
+    assert_eq!(assert_ready_ok!(res_b.poll()), "rb");
 }
