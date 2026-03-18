@@ -3,8 +3,8 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering}, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
     },
     task::{Context, Poll},
     time::Duration,
@@ -19,7 +19,7 @@ use tower_test::{
     mock::{self, Mock},
 };
 
-use tower_batch::{Batch, BatchControl, BoxError, error};
+use tower_batch::{error, Batch, BatchControl, BoxError};
 
 mod support;
 
@@ -143,7 +143,6 @@ async fn batch_flushes_on_elapsed_time() -> Result<(), BoxError> {
 
     Ok(())
 }
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clears_canceled_requests() {
@@ -409,7 +408,6 @@ async fn request_futures_fail_if_flush_fails() {
     let mut service = mock::Spawn::new(service);
     let mut worker = task::spawn(worker);
 
-
     handle.allow(4);
 
     assert_ready_ok!(service.poll_ready());
@@ -435,7 +433,6 @@ async fn request_futures_fail_if_flush_fails() {
     assert_ready_err!(res1.poll());
     assert_ready_err!(res2.poll());
 }
-
 
 #[tokio::test(flavor = "current_thread")]
 async fn wakes_pending_waiters_on_close() -> Result<(), BoxError> {
