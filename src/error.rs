@@ -6,7 +6,7 @@ use std::{fmt, sync::Arc};
 /// An error produced by a [`Service`] wrapped by a [`Batch`]
 ///
 /// [`Service`]: tower::Service
-/// [`Buffer`]: crate::buffer::Buffer -- FIXME: correct link
+/// [`Batch`]: crate::Batch
 #[derive(Debug)]
 pub struct ServiceError {
     inner: Arc<BoxError>,
