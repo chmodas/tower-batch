@@ -243,6 +243,8 @@ where
                                 if let Some(ref e) = this.bridge.failed {
                                     this.lot.notify(Some(e.clone()));
                                 }
+                                this.state.set(State::Finished);
+                                return Poll::Ready(());
                             }
                         }
                     }
