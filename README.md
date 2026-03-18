@@ -3,7 +3,7 @@
 [![CI Build](https://github.com/chmodas/tower-batch/actions/workflows/ci.yml/badge.svg)](https://github.com/chmodas/tower-batch/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/github/chmodas/tower-batch/graph/badge.svg?token=GLA3M3GGQC)](https://codecov.io/github/chmodas/tower-batch)
 
-A [Tower] middleware that buffers requests and flushes them in batches. Use it when the downstream system is more efficient with bulk writes — databases, message brokers, object stores, etc. The middleware collects individual requests as `BatchControl::Item(R)` and, once the buffer reaches a maximum size **or** a maximum duration elapses, signals the inner service with `BatchControl::Flush` so it can process the accumulated batch.
+A [Tower] middleware that buffers requests and flushes them in batches. Use it when the downstream system is more efficient with bulk writes – databases, message brokers, object stores, etc. The middleware collects individual requests as `BatchControl::Item(R)` and, once the buffer reaches a maximum size **or** a maximum duration elapses, signals the inner service with `BatchControl::Flush` so it can process the accumulated batch.
 
 ## Quick start
 
