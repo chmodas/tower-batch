@@ -3,7 +3,7 @@
 //! A Tower middleware that provides a buffered mpsc for processing requests in batches.
 //!
 //! Writing data in bulk is a common technique for improving the efficiency of certain tasks.
-//! `batch-tower` is a middleware that allows you to buffer requests for batch processing until
+//! `tower-batch` is a middleware that allows you to buffer requests for batch processing until
 //! the buffer reaches a maximum size OR a maximum duration elapses.
 //!
 //! Clients enqueue requests by sending on the channel from any of the handles ([`Batch`]), and the

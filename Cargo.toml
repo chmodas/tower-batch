@@ -7,9 +7,9 @@ license = "MIT"
 readme = "README.md"
 repository = "https://github.com/chmodas/tower-batch"
 homepage = "https://github.com/chmodas/tower-batch"
-documentation = "https://docs.rs/tower-batch/0.1.0"
+documentation = "https://docs.rs/tower-batch"
 description = """
-`batch-tower` is a Tower middleware that allows you to buffer requests for batch processing
+`tower-batch` is a Tower middleware that allows you to buffer requests for batch processing
 until the buffer reaches a maximum size OR a maximum duration elapses.
 """
 categories = ["asynchronous", "network-programming"]
@@ -29,7 +29,6 @@ pin-project-lite = "0.2.17"
 tokio = { version = "1.50.0", features = ["sync", "time", "tracing", "rt"] }
 tokio-util = { version = "0.7.18", default-features = false }
 tracing = "0.1.44"
-tracing-futures = "0.2.5"
 tower = "0.5.3"
 
 [dev-dependencies]
@@ -40,4 +39,5 @@ tokio = { version = "1", features = ["macros", "sync", "test-util", "rt-multi-th
 tokio-test = "0.4.5"
 tower = { version = "0.5.3", features = ["full"] }
 tower-test = "0.4.0"
+rusqlite = { version = "0.39.0", features = ["bundled", "array"] }
 
