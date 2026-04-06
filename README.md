@@ -11,7 +11,7 @@ Add the dependency to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tower-batch = { version = "0.2.0" }
+tower-batch = "0.3.0"
 ```
 
 Create a batch service and start sending requests:
