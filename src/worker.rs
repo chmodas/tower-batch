@@ -156,9 +156,11 @@ where
 
         let mut this = self.project();
 
-        // Flush if the max wait time is reached.
-        if let Poll::Ready(Some(())) = this.lot.poll_max_time(cx) {
-            this.state.set(State::flushing("time".to_owned(), None))
+        // Flush if the max wait time is reached (only when collecting, not during an active flush).
+        if matches!(this.state.as_ref().get_ref(), State::Collecting) {
+            if let Poll::Ready(Some(())) = this.lot.poll_max_time(cx) {
+                this.state.set(State::flushing("time".to_owned(), None));
+            }
         }
 
         loop {

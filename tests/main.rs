@@ -1032,3 +1032,62 @@ async fn cancelled_request_in_channel() {
 
     assert_eq!(assert_ready_ok!(res_b.poll()), "rb");
 }
+
+/// Regression test: poll_max_time must not overwrite an in-progress flush.
+///
+/// With batch size 1 and a 1ms timer, the size-based flush fires immediately.
+/// The 1ms timer expires well before the 50ms flush completes. Before the fix,
+/// the timer would reset the Flushing state, dropping the flush future.
+#[tokio::test]
+async fn timer_does_not_overwrite_in_progress_flush() {
+    let _guard = support::trace_init();
+
+    let flush_count = Arc::new(AtomicUsize::new(0));
+
+    struct SlowFlushService {
+        flush_count: Arc<AtomicUsize>,
+    }
+
+    impl Service<BatchControl<String>> for SlowFlushService {
+        type Response = ();
+        type Error = BoxError;
+        type Future = Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: BatchControl<String>) -> Self::Future {
+            match req {
+                BatchControl::Item(_) => Box::pin(futures::future::ready(Ok(()))),
+                BatchControl::Flush => {
+                    let count = self.flush_count.clone();
+                    Box::pin(async move {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                }
+            }
+        }
+    }
+
+    let service = SlowFlushService {
+        flush_count: flush_count.clone(),
+    };
+
+    // Batch size 1: flush triggers immediately on first item.
+    // max_time 1ms: timer fires well before the 50ms flush completes.
+    let mut batch = Batch::new(service, 1, Duration::from_millis(1));
+
+    batch.ready().await.unwrap();
+    let response = batch.call("hello".to_string());
+
+    response.await.unwrap();
+
+    assert_eq!(
+        flush_count.load(Ordering::SeqCst),
+        1,
+        "flush future should have run to completion, not been dropped by the timer"
+    );
+}
