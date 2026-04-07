@@ -22,6 +22,9 @@ exclude = [
   "README.md"
 ]
 
+[lints.clippy]
+pedantic = "warn"
+
 [dependencies]
 
 futures-core = "0.3"

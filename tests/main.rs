@@ -42,7 +42,7 @@ impl<T> Aggregator<T> {
             return false;
         }
         let items = &self.items.lock().unwrap();
-        items.get(index).map(|v| v.len() == size).unwrap_or(false)
+        items.get(index).is_some_and(|v| v.len() == size)
     }
 
     fn batch_items(&self, index: usize) -> Option<Vec<T>>
@@ -119,7 +119,7 @@ async fn batch_flushes_on_max_size() -> Result<(), BoxError> {
         results.push(span.in_scope(|| batch.call(i)));
     }
 
-    while let Some(Ok(_)) = results.next().await {}
+    while let Some(Ok(())) = results.next().await {}
 
     assert!(aggregator.batch_has_size(0, 10));
 
@@ -144,7 +144,7 @@ async fn batch_flushes_on_elapsed_time() -> Result<(), BoxError> {
         results.push(span.in_scope(|| batch.call(i)));
     }
 
-    while let Some(Ok(_)) = results.next().await {}
+    while let Some(Ok(())) = results.next().await {}
 
     // Give it enough time to finish
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -169,7 +169,7 @@ async fn batch_flushes_multiple_times() -> Result<(), BoxError> {
         results.push(span.in_scope(|| batch.call(i)));
     }
 
-    while let Some(Ok(_)) = results.next().await {}
+    while let Some(Ok(())) = results.next().await {}
 
     assert!(aggregator.batch_has_size(0, 10));
     assert!(aggregator.batch_has_size(1, 10));
@@ -191,7 +191,7 @@ async fn batch_items_are_ordered() -> Result<(), BoxError> {
         results.push(batch.call(i));
     }
 
-    while let Some(Ok(_)) = results.next().await {}
+    while let Some(Ok(())) = results.next().await {}
 
     let items = aggregator.batch_items(0).expect("batch 0 should exist");
     assert_eq!(items, (0..10).collect::<Vec<u32>>());
@@ -237,7 +237,7 @@ async fn concurrent_clones_send_requests() -> Result<(), BoxError> {
 
     // Verify all 9 items were actually delivered to the aggregator.
     let items = aggregator.items.lock().unwrap();
-    let delivered: usize = items.iter().map(|batch| batch.len()).sum();
+    let delivered: usize = items.iter().map(Vec::len).sum();
     assert_eq!(delivered, 9, "all 9 items should reach the aggregator");
 
     Ok(())
@@ -257,7 +257,7 @@ async fn time_based_flush_triggers_multiple_batches() -> Result<(), BoxError> {
         batch.ready().await?;
         results.push(batch.call(i));
     }
-    while let Some(Ok(_)) = results.next().await {}
+    while let Some(Ok(())) = results.next().await {}
     // Give the flush time to complete.
     tokio::time::sleep(Duration::from_millis(250)).await;
 
@@ -267,7 +267,7 @@ async fn time_based_flush_triggers_multiple_batches() -> Result<(), BoxError> {
         batch.ready().await?;
         results.push(batch.call(i));
     }
-    while let Some(Ok(_)) = results.next().await {}
+    while let Some(Ok(())) = results.next().await {}
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     assert!(
@@ -463,7 +463,7 @@ async fn when_inner_fails() {
 
         assert_eq!(e.to_string(), "foobar");
     } else {
-        panic!("unexpected error type: {:?}", e);
+        panic!("unexpected error type: {e:?}");
     }
 }
 
@@ -480,7 +480,7 @@ async fn poll_ready_when_worker_is_dropped_early() {
 
     let err = assert_ready_err!(service.poll_ready());
 
-    assert!(err.is::<error::Closed>(), "should be a Closed: {:?}", err);
+    assert!(err.is::<error::Closed>(), "should be a Closed: {err:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -502,7 +502,7 @@ async fn response_future_when_worker_is_dropped_early() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let err = assert_ready_err!(response.poll());
-    assert!(err.is::<error::Closed>(), "should be a Closed: {:?}", err);
+    assert!(err.is::<error::Closed>(), "should be a Closed: {err:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -655,8 +655,7 @@ async fn wakes_pending_waiters_on_close() -> Result<(), BoxError> {
     let err = assert_ready_err!(response.poll());
     assert!(
         err.is::<error::Closed>(),
-        "response should fail with a Closed, got: {:?}",
-        err
+        "response should fail with a Closed, got: {err:?}"
     );
 
     assert!(
@@ -666,8 +665,7 @@ async fn wakes_pending_waiters_on_close() -> Result<(), BoxError> {
     let err = assert_ready_err!(ready1.poll());
     assert!(
         err.is::<error::Closed>(),
-        "ready 1 should fail with a Closed, got: {:?}",
-        err
+        "ready 1 should fail with a Closed, got: {err:?}"
     );
 
     assert!(
@@ -677,8 +675,7 @@ async fn wakes_pending_waiters_on_close() -> Result<(), BoxError> {
     let err = assert_ready_err!(ready2.poll());
     assert!(
         err.is::<error::Closed>(),
-        "ready 2 should fail with a Closed, got: {:?}",
-        err
+        "ready 2 should fail with a Closed, got: {err:?}"
     );
 
     Ok(())
@@ -716,8 +713,7 @@ async fn wakes_pending_waiters_on_failure() -> Result<(), BoxError> {
     let err = assert_ready_err!(response.poll());
     assert!(
         err.is::<error::ServiceError>(),
-        "response should fail with a ServiceError, got: {:?}",
-        err
+        "response should fail with a ServiceError, got: {err:?}"
     );
 
     assert!(
@@ -727,8 +723,7 @@ async fn wakes_pending_waiters_on_failure() -> Result<(), BoxError> {
     let err = assert_ready_err!(ready1.poll());
     assert!(
         err.is::<error::ServiceError>(),
-        "ready 1 should fail with a ServiceError, got: {:?}",
-        err
+        "ready 1 should fail with a ServiceError, got: {err:?}"
     );
 
     assert!(
@@ -738,8 +733,7 @@ async fn wakes_pending_waiters_on_failure() -> Result<(), BoxError> {
     let err = assert_ready_err!(ready2.poll());
     assert!(
         err.is::<error::ServiceError>(),
-        "ready 2 should fail with a ServiceError, got: {:?}",
-        err
+        "ready 2 should fail with a ServiceError, got: {err:?}"
     );
 
     Ok(())
@@ -832,11 +826,10 @@ async fn batch_layer_wraps_service() {
     let layer = BatchLayer::<u32>::new(10, Duration::from_secs(1));
 
     // Cover Debug impl
-    let debug_str = format!("{:?}", layer);
+    let debug_str = format!("{layer:?}");
     assert!(
         debug_str.contains("BatchLayer"),
-        "Debug should contain 'BatchLayer', got: {}",
-        debug_str
+        "Debug should contain 'BatchLayer', got: {debug_str}",
     );
 
     // Cover Layer::layer() which delegates to Batch::new()
@@ -871,13 +864,12 @@ async fn error_display_and_debug_formatting() {
         let closed = err
             .downcast_ref::<error::Closed>()
             .expect("should be Closed");
-        let debug_str = format!("{:?}", closed);
-        assert!(debug_str.contains("Closed"), "Debug: {}", debug_str);
-        let display_str = format!("{}", closed);
+        let debug_str = format!("{closed:?}");
+        assert!(debug_str.contains("Closed"), "Debug: {debug_str}");
+        let display_str = format!("{closed}");
         assert!(
             display_str.contains("batch's worker closed unexpectedly"),
-            "Display: {}",
-            display_str
+            "Display: {display_str}",
         );
     }
 
@@ -902,11 +894,10 @@ async fn error_display_and_debug_formatting() {
         let svc_err = err
             .downcast_ref::<error::ServiceError>()
             .expect("should be ServiceError");
-        let display_str = format!("{}", svc_err);
+        let display_str = format!("{svc_err}");
         assert!(
             display_str.contains("batch service failed:"),
-            "Display: {}",
-            display_str
+            "Display: {display_str}",
         );
         // Also check source()
         let source = svc_err.source().unwrap();
@@ -933,11 +924,7 @@ async fn call_after_worker_death() {
 
     // Exercises ResponseState::Failed arm
     let err = assert_ready_err!(response.poll());
-    assert!(
-        err.is::<error::Closed>(),
-        "should be Closed, got: {:?}",
-        err
-    );
+    assert!(err.is::<error::Closed>(), "should be Closed, got: {err:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -977,14 +964,12 @@ async fn flush_phase_poll_ready_failure() {
     let err1 = assert_ready_err!(res1.poll());
     assert!(
         err1.is::<error::ServiceError>(),
-        "res1 should be ServiceError, got: {:?}",
-        err1
+        "res1 should be ServiceError, got: {err1:?}"
     );
     let err2 = assert_ready_err!(res2.poll());
     assert!(
         err2.is::<error::ServiceError>(),
-        "res2 should be ServiceError, got: {:?}",
-        err2
+        "res2 should be ServiceError, got: {err2:?}"
     );
 }
 
@@ -1033,12 +1018,13 @@ async fn cancelled_request_in_channel() {
     assert_eq!(assert_ready_ok!(res_b.poll()), "rb");
 }
 
-/// Regression test: poll_max_time must not overwrite an in-progress flush.
+/// Regression test: `poll_max_time` must not overwrite an in-progress flush.
 ///
 /// With batch size 1 and a 1ms timer, the size-based flush fires immediately.
 /// The 1ms timer expires well before the 50ms flush completes. Before the fix,
 /// the timer would reset the Flushing state, dropping the flush future.
 #[tokio::test]
+#[allow(clippy::items_after_statements)]
 async fn timer_does_not_overwrite_in_progress_flush() {
     let _guard = support::trace_init();
 
@@ -1092,9 +1078,9 @@ async fn timer_does_not_overwrite_in_progress_flush() {
     );
 }
 
-/// Regression: when poll_ready fails with multiple messages queued in the
+/// Regression: when `poll_ready` fails with multiple messages queued in the
 /// channel, the worker must terminate immediately instead of calling
-/// poll_ready again on the broken service (which could hang or behave
+/// `poll_ready` again on the broken service (which could hang or behave
 /// inconsistently).
 #[tokio::test(flavor = "current_thread")]
 async fn worker_terminates_on_poll_ready_error_with_queued_messages() {
@@ -1128,8 +1114,7 @@ async fn worker_terminates_on_poll_ready_error_with_queued_messages() {
     let err1 = assert_ready_err!(res1.poll());
     assert!(
         err1.is::<error::ServiceError>(),
-        "res1 should be ServiceError, got: {:?}",
-        err1
+        "res1 should be ServiceError, got: {err1:?}"
     );
 
     // Drop the worker so the channel receiver and remaining messages are
@@ -1141,7 +1126,6 @@ async fn worker_terminates_on_poll_ready_error_with_queued_messages() {
     let err2 = assert_ready_err!(res2.poll());
     assert!(
         err2.is::<error::Closed>(),
-        "res2 should be Closed, got: {:?}",
-        err2
+        "res2 should be Closed, got: {err2:?}"
     );
 }

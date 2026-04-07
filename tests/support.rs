@@ -9,6 +9,7 @@ use std::{
 use tower::Service;
 use tower_batch::BatchControl;
 
+#[must_use]
 pub fn trace_init() -> tracing::subscriber::DefaultGuard {
     let subscriber = tracing_subscriber::fmt()
         .with_test_writer()
@@ -40,6 +41,7 @@ impl fmt::Display for AssertSpanError {
 impl std::error::Error for AssertSpanError {}
 
 impl AssertSpanSvc {
+    #[must_use]
     pub fn new(span: tracing::Span) -> Self {
         Self { span }
     }
@@ -57,8 +59,8 @@ impl AssertSpanSvc {
         }
 
         Err(AssertSpanError(format!(
-            "{} called outside expected span\n expected: {:?}\n  current: {:?}",
-            func, self.span, current_span
+            "{func} called outside expected span\n expected: {span:?}\n  current: {current_span:?}",
+            span = self.span,
         )))
     }
 }
