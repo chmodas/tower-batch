@@ -45,6 +45,11 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
+      - name: Run examples
+        run: |
+          cargo run --example sqlite_batch
+          cargo run --example unreliable_api
+
   release:
     name: Release
     needs: build
