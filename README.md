@@ -46,11 +46,13 @@ Your inner service must implement `Service<BatchControl<R>>` where `R` is the re
 See the [`examples/`](examples/) directory:
 
 - **[`sqlite_batch`](examples/sqlite_batch.rs)** – batch-insert rows into an in-memory SQLite database using the rarray virtual table.
+- **[`unreliable_api`](examples/unreliable_api.rs)** – batch-write events to a simulated unreliable remote API, composing `Batch` with Tower's `Retry` and `Timeout` layers.
 
 Run an example with:
 
 ```sh
 cargo run --example sqlite_batch
+cargo run --example unreliable_api
 ```
 
 ## License
