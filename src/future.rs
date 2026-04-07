@@ -12,7 +12,7 @@ use pin_project_lite::pin_project;
 use super::{error::Closed, message};
 
 pin_project! {
-    /// Future that completes when the buffered service eventually services the submitted request.
+    /// Future that resolves once the batch worker has processed the submitted request.
     #[derive(Debug)]
     pub struct ResponseFuture<T> {
         #[pin]

@@ -831,11 +831,11 @@ async fn batch_layer_wraps_service() {
     let aggregator: Aggregator<u32> = Aggregator::new();
     let layer = BatchLayer::<u32>::new(10, Duration::from_secs(1));
 
-    // Cover Debug impl (prints "BufferLayer")
+    // Cover Debug impl
     let debug_str = format!("{:?}", layer);
     assert!(
-        debug_str.contains("BufferLayer"),
-        "Debug should contain 'BufferLayer', got: {}",
+        debug_str.contains("BatchLayer"),
+        "Debug should contain 'BatchLayer', got: {}",
         debug_str
     );
 
