@@ -22,6 +22,7 @@ impl<Request> BatchLayer<Request> {
     ///
     /// * `size` – the maximum number of items per batch.
     /// * `time` – the maximum duration before a batch is flushed.
+    #[must_use]
     pub fn new(size: usize, time: Duration) -> Self {
         Self {
             size,

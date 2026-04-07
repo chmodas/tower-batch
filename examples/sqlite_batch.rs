@@ -1,4 +1,4 @@
-//! Batch-insert rows into an in-memory SQLite database using the rarray virtual table.
+//! Batch-insert rows into an in-memory `SQLite` database using the rarray virtual table.
 //!
 //! Run with: `cargo run --example sqlite_batch`
 
@@ -107,7 +107,7 @@ async fn main() -> Result<(), BoxError> {
                 batch
                     .call(InsertRow {
                         name: format!("task{task_id}_row{i}"),
-                        value: (task_id * 50 + i) as i64,
+                        value: i64::from(task_id * 50 + i),
                     })
                     .await
                     .unwrap();

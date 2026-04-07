@@ -155,7 +155,7 @@ where
     fn call(&mut self, request: Request) -> Self::Future {
         tracing::debug!("sending request to batch worker");
 
-        let _permit = self
+        let permit = self
             .permit
             .take()
             .expect("batch full; poll_ready must be called first");
@@ -172,12 +172,12 @@ where
         // The worker is in control of completing the request now.
         match self.tx.send(Message {
             request,
-            span,
             tx,
-            _permit,
+            span,
+            _permit: permit,
         }) {
             Err(_) => ResponseFuture::failed(self.get_worker_error()),
-            Ok(_) => ResponseFuture::new(rx),
+            Ok(()) => ResponseFuture::new(rx),
         }
     }
 }

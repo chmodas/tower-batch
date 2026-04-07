@@ -151,6 +151,7 @@ where
 {
     type Output = ();
 
+    #[allow(clippy::too_many_lines)]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         trace!("polling worker");
 
@@ -166,53 +167,50 @@ where
         loop {
             match this.state.as_mut().project() {
                 StateProj::Collecting => {
-                    match ready!(this.bridge.poll_next_msg(cx)) {
-                        Some((msg, first)) => {
-                            let _guard = msg.span.enter();
+                    if let Some((msg, first)) = ready!(this.bridge.poll_next_msg(cx)) {
+                        let guard = msg.span.enter();
 
-                            trace!(resumed = !first, message = "worker received request");
+                        trace!(resumed = !first, message = "worker received request");
 
-                            // Wait for the service to be ready
-                            trace!(message = "waiting for service readiness");
-                            match this.service.poll_ready(cx) {
-                                Poll::Ready(Ok(())) => {
-                                    debug!(service.ready = true, message = "adding item");
+                        // Wait for the service to be ready
+                        trace!(message = "waiting for service readiness");
+                        match this.service.poll_ready(cx) {
+                            Poll::Ready(Ok(())) => {
+                                debug!(service.ready = true, message = "adding item");
 
-                                    let response = this.service.call(msg.request.into());
-                                    this.lot.add((msg.tx, Ok(response)));
+                                let response = this.service.call(msg.request.into());
+                                this.lot.add((msg.tx, Ok(response)));
 
-                                    // Flush if the batch is full.
-                                    if this.lot.is_full() {
-                                        this.state.set(State::flushing("size".to_owned(), None));
-                                    } else if this.lot.poll_max_time(cx).is_ready() {
-                                        // Or flush if the max time has elapsed.
-                                        this.state.set(State::flushing("time".to_owned(), None));
-                                    }
-                                }
-                                Poll::Pending => {
-                                    drop(_guard);
-                                    debug!(service.ready = false, message = "delay item addition");
-                                    this.bridge.return_msg(msg);
-                                    return Poll::Pending;
-                                }
-                                Poll::Ready(Err(e)) => {
-                                    drop(_guard);
-                                    this.bridge.failed("item addition", e.into());
-                                    if let Some(ref e) = this.bridge.failed {
-                                        // Ensure the current caller is notified too.
-                                        this.lot.add((msg.tx, Err(e.clone())));
-                                        this.lot.notify(Some(e.clone()));
-                                    }
-                                    this.state.set(State::Finished);
-                                    return Poll::Ready(());
+                                // Flush if the batch is full.
+                                if this.lot.is_full() {
+                                    this.state.set(State::flushing("size".to_owned(), None));
+                                } else if this.lot.poll_max_time(cx).is_ready() {
+                                    // Or flush if the max time has elapsed.
+                                    this.state.set(State::flushing("time".to_owned(), None));
                                 }
                             }
+                            Poll::Pending => {
+                                drop(guard);
+                                debug!(service.ready = false, message = "delay item addition");
+                                this.bridge.return_msg(msg);
+                                return Poll::Pending;
+                            }
+                            Poll::Ready(Err(e)) => {
+                                drop(guard);
+                                this.bridge.failed("item addition", e.into());
+                                if let Some(ref e) = this.bridge.failed {
+                                    // Ensure the current caller is notified too.
+                                    this.lot.add((msg.tx, Err(e.clone())));
+                                    this.lot.notify(Some(e));
+                                }
+                                this.state.set(State::Finished);
+                                return Poll::Ready(());
+                            }
                         }
-                        None => {
-                            trace!("shutting down, no more requests _ever_");
-                            this.state.set(State::Finished);
-                            return Poll::Ready(());
-                        }
+                    } else {
+                        trace!("shutting down, no more requests _ever_");
+                        this.state.set(State::Finished);
+                        return Poll::Ready(());
                     }
                 }
                 StateProj::Flushing { reason, flush_fut } => match flush_fut.as_pin_mut() {
@@ -243,7 +241,7 @@ where
                             Poll::Ready(Err(e)) => {
                                 this.bridge.failed("flush", e.into());
                                 if let Some(ref e) = this.bridge.failed {
-                                    this.lot.notify(Some(e.clone()));
+                                    this.lot.notify(Some(e));
                                 }
                                 this.state.set(State::Finished);
                                 return Poll::Ready(());
@@ -254,12 +252,12 @@ where
                         Ok(_) => {
                             debug!(reason = reason.as_mut().unwrap().as_str(), "batch flushed");
                             this.lot.notify(None);
-                            this.state.set(State::Collecting)
+                            this.state.set(State::Collecting);
                         }
                         Err(e) => {
                             this.bridge.failed("flush", e.into());
                             if let Some(ref e) = this.bridge.failed {
-                                this.lot.notify(Some(e.clone()));
+                                this.lot.notify(Some(e));
                             }
                             this.state.set(State::Finished);
                             return Poll::Ready(());
@@ -290,7 +288,7 @@ impl<Fut> State<Fut> {
 
 impl<Fut, Request> Drop for Bridge<Fut, Request> {
     fn drop(&mut self) {
-        self.close_semaphore()
+        self.close_semaphore();
     }
 }
 
@@ -385,7 +383,7 @@ impl<Fut, Request> Bridge<Fut, Request> {
     }
 
     fn return_msg(&mut self, msg: Message<Request, Fut>) {
-        self.current_message = Some(msg)
+        self.current_message = Some(msg);
     }
 }
 
@@ -434,10 +432,10 @@ impl<Fut> Lot<Fut> {
         self.responses.push(item);
     }
 
-    fn notify(&mut self, err: Option<ServiceError>) {
+    fn notify(&mut self, err: Option<&ServiceError>) {
         for (tx, response) in mem::replace(&mut self.responses, Vec::with_capacity(self.max_size)) {
-            if let Some(ref response) = err {
-                let _ = tx.send(Err(response.clone()));
+            if let Some(err) = err {
+                let _ = tx.send(Err(err.clone()));
             } else {
                 let _ = tx.send(response);
             }
@@ -455,8 +453,7 @@ impl Handle {
             .lock()
             .unwrap()
             .as_ref()
-            .map(|svc_err| svc_err.clone().into())
-            .unwrap_or_else(|| Closed::new().into())
+            .map_or_else(|| Closed::new().into(), |svc_err| svc_err.clone().into())
     }
 }
 
