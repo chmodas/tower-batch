@@ -16,9 +16,14 @@ use super::{
     BatchControl,
 };
 
-/// Allows batch processing of requests.
+/// Handle for submitting requests to a batch worker.
 ///
-/// See the module documentation for more details.
+/// Each `Batch` handle communicates with a single background worker over a
+/// shared channel. Handles are cheap to [`Clone`] – every clone sends to the
+/// same worker, so you can hand them to multiple tasks.
+///
+/// See the [module documentation](crate) for the full lifecycle and error
+/// semantics.
 #[derive(Debug)]
 pub struct Batch<T, Request>
 where
@@ -53,11 +58,12 @@ where
 {
     /// Creates a new `Batch` wrapping `service`.
     ///
-    /// The wrapper is responsible for telling the inner service when to flush a
-    /// batch of requests.
+    /// `size` is the maximum number of items per batch and `time` is the
+    /// maximum duration before a batch is flushed. The worker flushes
+    /// whichever limit is hit first.
     ///
-    /// The default Tokio executor is used to run the given service, which means
-    /// that this method must be called while on the Tokio runtime.
+    /// The background worker is spawned on the default Tokio executor, so
+    /// this method must be called while on the Tokio runtime.
     pub fn new(service: T, size: usize, time: std::time::Duration) -> Self
     where
         T: Send + 'static,

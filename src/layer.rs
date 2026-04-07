@@ -4,12 +4,13 @@ use tower::{layer::Layer, Service};
 
 use super::{service::Batch, BatchControl};
 
-/// Adds a layer performing batch processing of requests.
+/// A [`Layer`] that wraps an inner service with [`Batch`].
 ///
-/// The default Tokio executor is used to run the given service,
-/// which means that this layer can only be used on the Tokio runtime.
+/// The background worker is spawned on the default Tokio executor, so
+/// this layer can only be used on the Tokio runtime.
 ///
-/// See the module documentation for more details.
+/// See the [module documentation](crate) for the full lifecycle and error
+/// semantics.
 pub struct BatchLayer<Request> {
     size: usize,
     time: Duration,
@@ -19,11 +20,8 @@ pub struct BatchLayer<Request> {
 impl<Request> BatchLayer<Request> {
     /// Creates a new [`BatchLayer`].
     ///
-    /// The wrapper is responsible for telling the inner service when to flush a batch of requests.
-    /// Two parameters control this policy:
-    ///
-    /// * `size` gives the maximum number of items per batch.
-    /// * `time` gives the maximum duration before a batch is flushed.
+    /// * `size` – the maximum number of items per batch.
+    /// * `time` – the maximum duration before a batch is flushed.
     pub fn new(size: usize, time: Duration) -> Self {
         Self {
             size,
@@ -49,7 +47,7 @@ where
 
 impl<Request> fmt::Debug for BatchLayer<Request> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("BufferLayer")
+        f.debug_struct("BatchLayer")
             .field("size", &self.size)
             .field("time", &self.time)
             .finish()

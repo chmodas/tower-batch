@@ -12,7 +12,7 @@ pub struct ServiceError {
     inner: Arc<BoxError>,
 }
 
-/// An error produced when the a buffer's worker closes unexpectedly.
+/// An error produced when the batch worker closes unexpectedly.
 pub struct Closed {
     _p: (),
 }
