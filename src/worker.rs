@@ -184,10 +184,8 @@ where
                                     // Flush if the batch is full.
                                     if this.lot.is_full() {
                                         this.state.set(State::flushing("size".to_owned(), None));
-                                    }
-
-                                    // Or flush if the max time has elapsed.
-                                    if this.lot.poll_max_time(cx).is_ready() {
+                                    } else if this.lot.poll_max_time(cx).is_ready() {
+                                        // Or flush if the max time has elapsed.
                                         this.state.set(State::flushing("time".to_owned(), None));
                                     }
                                 }
