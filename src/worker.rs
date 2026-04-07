@@ -49,7 +49,7 @@ struct Bridge<Fut, Request> {
 /// Accumulates batch items with their oneshot response senders.
 ///
 /// Tracks the max-time timer (started when the first item arrives) and
-/// dispatches results — or errors — to all collected senders on flush via
+/// dispatches results – or errors – to all collected senders on flush via
 /// [`notify`](Lot::notify).
 #[derive(Debug)]
 struct Lot<Fut> {
@@ -205,6 +205,8 @@ where
                                         this.lot.add((msg.tx, Err(e.clone())));
                                         this.lot.notify(Some(e.clone()));
                                     }
+                                    this.state.set(State::Finished);
+                                    return Poll::Ready(());
                                 }
                             }
                         }
