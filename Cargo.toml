@@ -42,5 +42,6 @@ tokio = { version = "1", features = ["macros", "sync", "test-util", "rt-multi-th
 tokio-test = "0.4"
 tower = { version = "0.5", features = ["full"] }
 tower-test = "0.4"
+proptest = "1"
 rusqlite = { version = "0.39", features = ["bundled", "array"] }
 
