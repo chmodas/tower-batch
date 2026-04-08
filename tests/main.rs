@@ -1,10 +1,9 @@
 use std::{
-    fmt::Debug,
     future::Future,
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     task::{Context, Poll},
     time::Duration,
@@ -22,84 +21,7 @@ use tower_test::{
 use tower_batch::{error, Batch, BatchControl, BatchLayer, BoxError};
 
 mod support;
-
-#[derive(Clone)]
-struct Aggregator<T> {
-    items: Arc<Mutex<Vec<Vec<T>>>>,
-    current: Arc<AtomicUsize>,
-}
-
-impl<T> Aggregator<T> {
-    pub fn new() -> Self {
-        Self {
-            items: Arc::new(Mutex::new(Vec::new())),
-            current: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    fn batch_has_size(&self, index: usize, size: usize) -> bool {
-        if index == self.current.load(Ordering::Acquire) {
-            return false;
-        }
-        let items = &self.items.lock().unwrap();
-        items.get(index).is_some_and(|v| v.len() == size)
-    }
-
-    fn batch_items(&self, index: usize) -> Option<Vec<T>>
-    where
-        T: Clone,
-    {
-        if index == self.current.load(Ordering::Acquire) {
-            return None;
-        }
-        let items = self.items.lock().unwrap();
-        items.get(index).cloned()
-    }
-}
-
-impl<T> Service<BatchControl<T>> for Aggregator<T>
-where
-    T: Debug,
-{
-    type Response = ();
-    type Error = BoxError;
-    type Future = Pin<Box<dyn Future<Output = Result<(), BoxError>> + Send + Sync + 'static>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: BatchControl<T>) -> Self::Future {
-        match req {
-            BatchControl::Item(item) => {
-                let mut items = self.items.lock().unwrap();
-                match items.get_mut(self.current.load(Ordering::Acquire)) {
-                    None => {
-                        items.push(vec![item]);
-                    }
-                    Some(v) => {
-                        v.push(item);
-                    }
-                }
-            }
-            BatchControl::Flush => {
-                self.current.fetch_add(1, Ordering::SeqCst);
-                return Box::pin(async {
-                    tracing::info!("sleeping ...");
-                    async {
-                        // Simulate some activity to catch any flushing issues
-                        tokio::time::sleep(Duration::from_nanos(5)).await;
-                    }
-                    .await;
-                    tracing::info!("awaking ...");
-                    Ok(())
-                });
-            }
-        }
-
-        Box::pin(futures::future::ready(Ok(())))
-    }
-}
+use support::Aggregator;
 
 #[tokio::test]
 async fn batch_flushes_on_max_size() -> Result<(), BoxError> {
@@ -236,8 +158,7 @@ async fn concurrent_clones_send_requests() -> Result<(), BoxError> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Verify all 9 items were actually delivered to the aggregator.
-    let items = aggregator.items.lock().unwrap();
-    let delivered: usize = items.iter().map(Vec::len).sum();
+    let delivered = aggregator.all_items_flat().len();
     assert_eq!(delivered, 9, "all 9 items should reach the aggregator");
 
     Ok(())
